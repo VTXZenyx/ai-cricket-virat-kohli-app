@@ -1,10 +1,60 @@
-# AI Virat Kohli — Phase 1 VS Code Template
+# AI Virat Kohli — 
 
-A **runnable fan-made prototype** with the UI direction you selected: Tavus/Bad-Santa-style draggable desktop window mechanics, a code-built animated cricket ball, Virat Kohli-inspired blue/red/gold sports styling, text chat, voice/video call buttons, and Supabase knowledge integration-ready backend.
+interactive Virat Kohli-inspired mentor built around cricket, competition, discipline, fitness, confidence, pressure, and mindset.
 
-> This is a fan-made AI experience. It is not Virat Kohli and is not affiliated with or endorsed by Virat Kohli. Use an exact voice or likeness only if appropriately authorized/licensed.
+The app combines a retro sports desktop-style interface with a code-built animated cricket ball, text conversations, voice conversations, knowledge retrieval, and future video-call support.
 
-## Project structure
+> This is a fan-made project. It is not affiliated with or endorsed by Virat Kohli. Any exact voice, likeness, or other protected material should only be used with appropriate authorization or licensing.
+
+## Current Tech Stack
+
+### Frontend
+
+- Next.js
+- React
+- TypeScript
+- CSS
+- Browser MediaRecorder API
+- Web Audio API
+
+### Backend
+
+- Python
+- FastAPI
+- `uv`
+
+### Language Model
+
+- Ollama
+- Qwen3:8b
+- Runs locally
+
+### Speech-to-Text
+
+- MLX Whisper
+- Optimized for Apple Silicon
+- FFmpeg for audio processing
+
+### Voice Generation
+
+- Fish Audio
+
+### Knowledge / Database
+
+- Supabase
+- PostgreSQL
+- Approved Virat-related knowledge records
+- Keyword-based retrieval for Phase 1
+- pgvector planned later
+
+### Video
+
+- Tavus integration prepared
+- Video-call functionality is still part of Phase 1 development
+
+---
+
+## Project Structure
 
 ```text
 kohli-ai-mentor-final-vscode/
@@ -12,283 +62,644 @@ kohli-ai-mentor-final-vscode/
 │   ├── tasks.json
 │   ├── extensions.json
 │   └── settings.json
+│
 ├── backend/
 │   ├── app/
 │   │   ├── routes/
+│   │   │   ├── __init__.py
 │   │   │   ├── calls.py
 │   │   │   ├── chat.py
 │   │   │   ├── knowledge.py
+│   │   │   ├── stt.py
 │   │   │   └── tts.py
+│   │   │
 │   │   ├── services/
-│   │   │   ├── elevenlabs_service.py
+│   │   │   ├── __init__.py
+│   │   │   ├── fish_audio_service.py
 │   │   │   ├── knowledge_service.py
 │   │   │   ├── openai_service.py
-│   │   │   └── tavus_service.py
+│   │   │   ├── tavus_service.py
+│   │   │   └── whisper_service.py
+│   │   │
 │   │   ├── config.py
 │   │   ├── main.py
 │   │   ├── persona.py
 │   │   └── schemas.py
+│   │
 │   ├── .env.example
-│   └── pyproject.toml
+│   ├── pyproject.toml
+│   └── uv.lock
+│
 ├── frontend/
 │   ├── public/
 │   │   └── icon.svg
+│   │
 │   ├── src/
 │   │   ├── app/
 │   │   │   ├── globals.css
 │   │   │   ├── layout.tsx
 │   │   │   ├── manifest.ts
 │   │   │   └── page.tsx
+│   │   │
 │   │   ├── components/
 │   │   │   ├── CallModal.tsx
 │   │   │   ├── ChatExperience.tsx
 │   │   │   ├── CricketBall.tsx
 │   │   │   └── ViratDesktop.tsx
+│   │   │
 │   │   └── lib/
 │   │       └── api.ts
+│   │
 │   ├── .env.example
 │   ├── package.json
 │   └── tsconfig.json
+│
 ├── scripts/
 │   └── dev.sh
+│
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
 
-## What works without API keys
+---
 
-You can run the project immediately in **demo mode**:
+## What Currently Works
 
-- draggable AI Virat Kohli window
-- close/minimize/reopen from taskbar
+The current prototype includes:
+
+- draggable desktop-style main window
+- minimize, close, and reopen behaviour
+- custom Virat/Kohli-inspired sports interface
 - code-built spinning cricket ball
-- Message / Voice / Video UI
-- working text-chat flow with local demo replies
-- demo voice/video call screens
-- browser speech fallback for AI replies
+- Message / Voice / Video modes
+- real local text conversations using Qwen3:8b
+- Virat-inspired personality prompt
+- conversation history
+- Supabase knowledge retrieval
+- approved knowledge filtering
+- microphone recording
+- local speech-to-text using MLX Whisper
+- generated voice responses using Fish Audio
+- working voice pipeline from microphone to spoken response
+- Web Audio API playback
+- call timer and call interface
+- video-call UI ready for Tavus integration
 
-## First-time setup on your Mac
+---
 
-### 1. Open this folder in VS Code
+# How Text Chat Works
 
-Use **File → Open Folder** and select this project root.
+```text
+User message
+     ↓
+Next.js frontend
+     ↓
+FastAPI /api/chat
+     ↓
+Virat-inspired persona
+     +
+Conversation history
+     +
+Relevant Supabase knowledge
+     ↓
+Ollama
+     ↓
+Qwen3:8b
+     ↓
+Response returned to frontend
+```
 
-### 2. Backend install
+The language model runs locally using Ollama, meaning normal text generation does not require a paid LLM API.
 
-In VS Code Terminal 1:
+---
+
+# How Voice Calls Work
+
+The current voice-call prototype uses a turn-based pipeline:
+
+```text
+User speaks
+     ↓
+Browser microphone
+     ↓
+MediaRecorder
+     ↓
+FastAPI /api/stt
+     ↓
+MLX Whisper
+     ↓
+Transcript
+     ↓
+FastAPI /api/chat
+     ↓
+Qwen3:8b + Persona + Supabase
+     ↓
+Text response
+     ↓
+FastAPI /api/tts
+     ↓
+Fish Audio
+     ↓
+Web Audio API
+     ↓
+Spoken response
+```
+
+The current version uses:
+
+```text
+MIC → Speak → STOP
+```
+
+Automatic silence detection and more natural hands-free conversation are planned improvements.
+
+---
+
+# First-Time Setup
+
+## 1. Clone the Repository
+
+```bash
+git clone https://github.com/VTXZenyx/ai-cricket-virat-kohli-app.git
+```
+
+Then:
+
+```bash
+cd ai-cricket-virat-kohli-app
+```
+
+Open it in VS Code:
+
+```bash
+code .
+```
+
+---
+
+## 2. Install Ollama
+
+Install Ollama on the computer that will run the project.
+
+Then download Qwen:
+
+```bash
+ollama pull qwen3:8b
+```
+
+Check that Ollama is running:
+
+```bash
+ollama list
+```
+
+You should see:
+
+```text
+qwen3:8b
+```
+
+The Ollama API normally runs at:
+
+```text
+http://127.0.0.1:11434
+```
+
+---
+
+## 3. Backend Setup
+
+Open a terminal:
 
 ```bash
 cd backend
+```
+
+Create your local environment file:
+
+```bash
 cp .env.example .env
+```
+
+Install dependencies:
+
+```bash
 uv sync
 ```
 
-If you do not have `uv` installed, install it first or use a normal Python virtual environment.
+---
 
-### 3. Frontend install
+## 4. Install FFmpeg
 
-In VS Code Terminal 2:
+MLX Whisper requires FFmpeg.
+
+On macOS with Homebrew:
+
+```bash
+brew install ffmpeg
+```
+
+Check it:
+
+```bash
+which ffmpeg
+```
+
+Expected Apple Silicon path:
+
+```text
+/opt/homebrew/bin/ffmpeg
+```
+
+---
+
+## 5. Frontend Setup
+
+Open another terminal:
 
 ```bash
 cd frontend
+```
+
+Create your local frontend environment:
+
+```bash
 cp .env.example .env.local
+```
+
+Install packages:
+
+```bash
 npm install
 ```
 
-### 4. Run both
+Your local frontend environment should contain:
 
-You have two options.
-
-**Option A — VS Code task**
-
-Press:
-
-```text
-Cmd + Shift + P
+```env
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-Search:
+---
+
+# Environment Variables
+
+Private keys must only be stored inside:
 
 ```text
-Tasks: Run Task
+backend/.env
 ```
 
-Choose:
+Do not commit this file to GitHub.
 
-```text
-Run Phase 1
+Example configuration:
+
+```env
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3:8b
+
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+
+FISH_AUDIO_API_KEY=
+FISH_AUDIO_REFERENCE_ID=
+FISH_AUDIO_MODEL=s2.1-pro-free
+
+WHISPER_MODEL=mlx-community/whisper-small-mlx
+
+TAVUS_API_KEY=
+TAVUS_PERSONA_ID=
+TAVUS_REPLICA_ID=
 ```
 
-**Option B — two terminals**
+The frontend should only contain safe public configuration such as:
 
-Backend:
+```env
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Never place private Supabase, Fish Audio, or Tavus keys in the frontend.
+
+---
+
+# Running the Project
+
+You normally need three services running.
+
+## Terminal 1 — Ollama
+
+Ollama normally runs as a background service.
+
+Check:
+
+```bash
+ollama list
+```
+
+---
+
+## Terminal 2 — Backend
 
 ```bash
 cd backend
+```
+
+Then:
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
 uv run fastapi dev app/main.py
 ```
 
-Frontend:
+Backend:
+
+```text
+http://127.0.0.1:8000
+```
+
+Health check:
+
+```text
+http://127.0.0.1:8000/health
+```
+
+---
+
+## Terminal 3 — Frontend
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Then open:
+Open:
 
 ```text
 http://localhost:3000
 ```
 
-Backend health check:
+---
 
-```text
-http://127.0.0.1:8000/health
-```
+# Supabase Knowledge System
 
-## Add OpenAI
+The application currently uses two main Supabase tables.
 
-Edit `backend/.env`:
+## `sources`
 
-```env
-OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-5.6-terra
-```
+Stores information about where material came from, including:
 
-Restart the backend.
+- platform
+- source URL
+- source title
+- transcript
+- caption
+- source quality
+- verification status
+- processing status
 
-## Connect your current Supabase project
+## `virat_knowledge`
 
-In **Supabase → Project Settings / Connect / API Keys**, get your project URL and **server-side service-role key**.
+Stores cleaned knowledge extracted from sources.
 
-Put them only in `backend/.env`:
+Example fields include:
 
-```env
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your_server_side_key
-```
+- topic
+- subtopic
+- knowledge type
+- content
+- quote text
+- verification
+- confidence
+- tags
+- approved status
 
-Never put the service-role key in `frontend/`.
-
-This template expects your current table:
-
-```text
-virat_knowledge
-```
-
-and only retrieves rows where:
+Only knowledge where:
 
 ```text
 approved = true
 ```
 
-For Phase 1 it uses simple keyword ranking. Later replace `knowledge_service.py` with pgvector similarity search.
+is intended to be used by the mentor.
 
-Test the connection at:
+Current Phase 1 retrieval uses keyword matching.
 
-```text
-http://127.0.0.1:8000/api/knowledge/status
-```
-
-Example search:
+A later version can use:
 
 ```text
-http://127.0.0.1:8000/api/knowledge/search?q=pressure%20confidence
+Embeddings
++
+Supabase pgvector
++
+Semantic similarity search
 ```
 
-## Add Tavus
+---
 
-Edit `backend/.env`:
+# Important Files
 
-```env
-TAVUS_API_KEY=
-TAVUS_PERSONA_ID=
-TAVUS_REPLICA_ID=
-```
-
-The same backend route is used for:
-
-- voice → `audio_only: true`
-- video → `audio_only: false`
-
-Without these values, the UI uses the built-in demo call screens.
-
-## Add ElevenLabs
-
-Use an authorized/licensed voice:
-
-```env
-ELEVENLABS_API_KEY=
-ELEVENLABS_VOICE_ID=
-ELEVENLABS_MODEL_ID=eleven_flash_v2_5
-```
-
-Without it, the Listen button uses browser speech synthesis.
-
-## Most important files for you to edit
-
-### Main homepage / draggable window
+## Main Interface
 
 ```text
 frontend/src/components/ViratDesktop.tsx
 ```
 
-### Cricket ball
+Controls the main draggable desktop-style application window.
+
+---
+
+## Cricket Ball
 
 ```text
 frontend/src/components/CricketBall.tsx
 ```
 
-The ball is SVG/CSS code — not a PNG.
+The cricket ball is created using code rather than a PNG image.
 
-### All styling / colours / background
+---
+
+## Styling
 
 ```text
 frontend/src/app/globals.css
 ```
 
-### Chat UI
+Contains the primary:
+
+- blue
+- navy
+- red
+- gold
+- stadium-inspired styling
+- animations
+- call interface styling
+
+---
+
+## Text Chat
 
 ```text
 frontend/src/components/ChatExperience.tsx
 ```
 
-### AI personality
+Handles the chat interface.
+
+---
+
+## Voice / Video Call Interface
+
+```text
+frontend/src/components/CallModal.tsx
+```
+
+Handles:
+
+- microphone recording
+- call states
+- voice playback
+- call controls
+- video-call interface
+
+---
+
+## Personality
 
 ```text
 backend/app/persona.py
 ```
 
-### OpenAI behavior
+Contains the personality and behavioural instructions used by the local language model.
+
+---
+
+## Language Model Service
 
 ```text
 backend/app/services/openai_service.py
 ```
 
-### Supabase knowledge retrieval
+Despite the current filename, this service is being used for the Ollama/Qwen language-model connection.
+
+The filename can be renamed later to something clearer such as:
+
+```text
+ollama_service.py
+```
+
+---
+
+## Speech Recognition
+
+```text
+backend/app/services/whisper_service.py
+```
+
+Uses MLX Whisper to convert recorded speech into text.
+
+---
+
+## Voice Generation
+
+```text
+backend/app/services/fish_audio_service.py
+```
+
+Generates spoken responses.
+
+---
+
+## Knowledge Retrieval
 
 ```text
 backend/app/services/knowledge_service.py
 ```
 
-### Tavus call integration
+Retrieves approved knowledge from Supabase.
+
+---
+
+## Video Integration
 
 ```text
 backend/app/services/tavus_service.py
 ```
 
-## Phase 1 target
+Contains the Tavus integration used for future video conversations.
 
-A Phase 1 release is done when a user can:
+---
 
-1. open the live web app
-2. move/close/reopen the main Virat Kohli window
-3. message the AI mentor
-4. get a real OpenAI response
-5. retrieve relevant approved knowledge from Supabase
-6. start a real Tavus voice call
-7. start a real Tavus video call
-8. use it on desktop and mobile
-9. see no exposed private API keys
-10. understand that this is a fan-made AI experience
+# API Routes
+
+Current backend routes include:
+
+```text
+POST /api/chat
+POST /api/stt
+POST /api/tts
+
+GET  /api/knowledge/status
+GET  /api/knowledge/search
+
+POST /api/calls/session
+POST /api/calls/{conversation_id}/end
+
+GET  /health
+```
+
+---
+
+# Current Phase 1 Goal
+
+Phase 1 aims to deliver a polished prototype where users can:
+
+1. open the application
+2. move, minimize, close, and reopen the main window
+3. interact through text
+4. receive real responses from the local Qwen model
+5. retrieve approved Virat-related knowledge from Supabase
+6. speak through their microphone
+7. convert speech locally using MLX Whisper
+8. receive generated spoken responses
+9. start a video conversation through Tavus
+10. use the application on desktop and mobile
+11. keep all private API keys secure
+12. clearly understand that the project is fan-made
+
+---
+
+# Planned Improvements
+
+After the basic Phase 1 functionality is stable:
+
+- faster Qwen response times
+- streamed text responses
+- shorter voice latency
+- automatic silence detection
+- automatic listening after a spoken response
+- natural hands-free voice conversation
+- better speech recognition for cricket-specific names
+- pgvector semantic knowledge search
+- expanded verified Virat knowledge dataset
+- Tavus video conversations
+- improved mobile design
+- production deployment
+- performance monitoring
+
+---
+
+## Git Workflow
+
+Before starting work on another computer:
+
+```bash
+git pull
+```
+
+After making changes:
+
+```bash
+git add .
+git commit -m "Describe your changes"
+git push
+```
+
+This keeps the latest version of the project synchronized through GitHub.
