@@ -10,7 +10,13 @@ import {
 import {
   CallSession,
   endCall,
+  streamChat,
 } from "@/lib/api";
+
+import {
+  createSequentialPrefetchQueue,
+  takeSpeakableSegments,
+} from "@/lib/voiceStreaming";
 
 type Props = {
   session: CallSession;
@@ -706,6 +712,187 @@ export function CallModal({
     return text;
   }
 
+  async function streamVoiceReply(
+    transcript: string,
+    signal: AbortSignal
+  ) {
+    let fullReply = "";
+    let sentenceBuffer = "";
+
+    /*
+     * This is the important latency change.
+     *
+     * Qwen continues generating while Fish
+     * prepares and plays completed sentences.
+     *
+     * Preparation:
+     * sentence 1 -> Fish
+     * sentence 2 -> Fish while sentence 1 plays
+     *
+     * Playback:
+     * sentence 1 -> sentence 2 -> sentence 3
+     */
+    const queue =
+      createSequentialPrefetchQueue<
+        string,
+        AudioBuffer
+      >(
+        async (sentence) => {
+          return await prepareSpeechSegment(
+            sentence,
+            signal
+          );
+        },
+
+        async (audioBuffer) => {
+          await playPreparedAudio(
+            audioBuffer
+          );
+        }
+      );
+
+    function queueSentence(
+      sentence: string
+    ) {
+      const cleaned =
+        sentence.trim();
+
+      if (!cleaned) {
+        return;
+      }
+
+      console.log(
+        "[voice] TTS queued:",
+        cleaned
+      );
+
+      /*
+       * This returns immediately.
+       *
+       * We do NOT wait for Fish here,
+       * so Qwen can keep streaming.
+       */
+      queue.enqueue(
+        cleaned
+      );
+    }
+
+    console.log(
+      "[voice] Qwen stream started"
+    );
+
+    await streamChat(
+      transcript,
+      historyRef.current.slice(-6),
+      {
+        onMeta: (
+          provider,
+          knowledgeUsed
+        ) => {
+          console.log(
+            "[voice] Qwen stream meta:",
+            {
+              provider,
+              knowledgeUsed,
+            }
+          );
+        },
+
+        onToken: (token) => {
+          fullReply += token;
+          sentenceBuffer += token;
+
+          const result =
+            takeSpeakableSegments(
+              sentenceBuffer,
+              false
+            );
+
+          sentenceBuffer =
+            result.remainder;
+
+          for (
+            const sentence of
+            result.segments
+          ) {
+            console.log(
+              "[voice] sentence ready:",
+              sentence
+            );
+
+            /*
+             * THIS is where Fish now
+             * starts before Qwen has
+             * finished the reply.
+             */
+            queueSentence(
+              sentence
+            );
+          }
+        },
+      },
+      {
+        channel: "voice",
+        signal,
+      }
+    );
+
+    /*
+     * Flush any final text that Qwen
+     * produced without punctuation.
+     */
+    const finalResult =
+      takeSpeakableSegments(
+        sentenceBuffer,
+        true
+      );
+
+    for (
+      const sentence of
+      finalResult.segments
+    ) {
+      console.log(
+        "[voice] final sentence ready:",
+        sentence
+      );
+
+      queueSentence(
+        sentence
+      );
+    }
+
+    const reply =
+      fullReply.trim();
+
+    if (!reply) {
+      throw new Error(
+        "The AI returned an empty response."
+      );
+    }
+
+    console.log(
+      "[voice] Qwen stream finished"
+    );
+
+    /*
+     * Qwen may be finished while Fish
+     * sentence 2/3 is still playing.
+     *
+     * Wait only for the remaining
+     * queued audio here.
+     */
+    console.log(
+      "[voice] waiting for audio queue"
+    );
+
+    await queue.finish();
+
+    console.log(
+      "[voice] audio queue finished"
+    );
+
+    return reply;
+  }
 
   async function sendTranscriptToAI(
     transcript: string,
@@ -764,6 +951,142 @@ export function CallModal({
     return reply;
   }
 
+  async function prepareSpeechSegment(
+    text: string,
+    signal: AbortSignal
+  ): Promise<AudioBuffer> {
+    console.log(
+      "[voice] preparing Fish sentence:",
+      text
+    );
+
+    const response =
+      await fetch(
+        `${apiBase}/api/tts`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            text,
+          }),
+          signal,
+        }
+      );
+
+    if (!response.ok) {
+      throw new Error(
+        await readApiError(
+          response
+        )
+      );
+    }
+
+    const context =
+      await unlockAudio();
+
+    const audioData =
+      await response.arrayBuffer();
+
+    if (
+      !callActiveRef.current ||
+      endingRef.current
+    ) {
+      throw new Error(
+        "Call ended."
+      );
+    }
+
+    const audioBuffer =
+      await context.decodeAudioData(
+        audioData
+      );
+
+    console.log(
+      "[voice] Fish sentence ready:",
+      text
+    );
+
+    return audioBuffer;
+  }
+
+
+  async function playPreparedAudio(
+    audioBuffer: AudioBuffer
+  ): Promise<void> {
+    if (
+      !callActiveRef.current ||
+      endingRef.current
+    ) {
+      return;
+    }
+
+    const context =
+      await unlockAudio();
+
+    if (
+      context.state !== "running"
+    ) {
+      throw new Error(
+        "Browser audio is paused. Press RETRY once to enable call audio."
+      );
+    }
+
+    /*
+     * While AI speech is playing,
+     * prevent it from hearing itself.
+     */
+    setMicrophoneEnabled(
+      false
+    );
+
+    setVoiceState(
+      "speaking"
+    );
+
+    return await new Promise<void>(
+      (resolve, reject) => {
+        const source =
+          context.createBufferSource();
+
+        source.buffer =
+          audioBuffer;
+
+        source.connect(
+          context.destination
+        );
+
+        audioSourceRef.current =
+          source;
+
+        source.onended = () => {
+          if (
+            audioSourceRef.current ===
+            source
+          ) {
+            audioSourceRef.current =
+              null;
+          }
+
+          try {
+            source.disconnect();
+          } catch {
+            // Already disconnected.
+          }
+
+          resolve();
+        };
+
+        try {
+          source.start(0);
+        } catch (error) {
+          reject(error);
+        }
+      }
+    );
+  }
 
   async function speakText(
     text: string,
@@ -967,7 +1290,7 @@ export function CallModal({
       );
 
       const reply =
-        await sendTranscriptToAI(
+        await streamVoiceReply(
           transcript,
           controller.signal
         );
@@ -988,7 +1311,7 @@ export function CallModal({
        * in the ref so the next automatic
        * voice turn immediately sees it.
        */
-      historyRef.current = [
+      const nextHistory: VoiceTurn[] = [
         ...historyRef.current,
         {
           role: "user",
@@ -998,20 +1321,48 @@ export function CallModal({
           role: "assistant",
           content: reply,
         },
-      ].slice(-6);
+      ];
 
+      historyRef.current =
+        nextHistory.slice(-6);
+
+      /*
+       * streamVoiceReply() has already
+       * generated AND played all Fish
+       * sentence audio by this point.
+       */
       console.log(
-        "[voice] requesting Fish Audio"
+        "[voice] streamed voice reply complete"
       );
 
-      await speakText(
-        reply,
-        controller.signal
-      );
+      currentRequestRef.current =
+        null;
 
-      console.log(
-        "[voice] Fish audio started"
-      );
+      processingRef.current =
+        false;
+
+      if (
+        !callActiveRef.current ||
+        endingRef.current
+      ) {
+        return;
+      }
+
+      if (
+        mutedRef.current
+      ) {
+        setVoiceState(
+          "muted"
+        );
+
+        return;
+      }
+
+      /*
+       * Entire queued reply has finished.
+       * Start hands-free listening again.
+       */
+      scheduleListening();
 
       currentRequestRef.current =
         null;
