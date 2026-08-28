@@ -89,3 +89,102 @@ export function takeSpeakableSegments(
         remainder,
     };
 }
+
+export type SequentialPrefetchQueue<
+    TInput,
+    TPrepared
+> = {
+    enqueue: (
+        input: TInput
+    ) => void;
+
+    finish: () =>
+        Promise<void>;
+};
+
+
+export function createSequentialPrefetchQueue<
+    TInput,
+    TPrepared
+>(
+    prepare: (
+        input: TInput
+    ) => Promise<TPrepared>,
+
+    play: (
+        prepared: TPrepared
+    ) => Promise<void>
+): SequentialPrefetchQueue<
+    TInput,
+    TPrepared
+> {
+    /*
+     * TTS preparation is kept in order.
+     *
+     * Sentence 2 can begin preparation
+     * as soon as sentence 1 has finished
+     * preparing. It does NOT need to wait
+     * for sentence 1 to finish playing.
+     */
+    let preparationTail:
+        Promise<void> =
+        Promise.resolve();
+
+    /*
+     * Playback stays strictly sequential.
+     *
+     * This prevents sentence 2 from
+     * speaking over sentence 1.
+     */
+    let playbackTail:
+        Promise<void> =
+        Promise.resolve();
+
+
+    function enqueue(
+        input: TInput
+    ) {
+        const prepared =
+            preparationTail.then(
+                () =>
+                    prepare(input)
+            );
+
+        /*
+         * Allow preparation of the next
+         * sentence to continue independently
+         * of playback.
+         */
+        preparationTail =
+            prepared.then(
+                () => undefined
+            );
+
+        /*
+         * But audio playback itself remains
+         * strictly ordered.
+         */
+        playbackTail =
+            playbackTail.then(
+                async () => {
+                    const result =
+                        await prepared;
+
+                    await play(
+                        result
+                    );
+                }
+            );
+    }
+
+
+    async function finish() {
+        await playbackTail;
+    }
+
+
+    return {
+        enqueue,
+        finish,
+    };
+}
