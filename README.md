@@ -3,11 +3,6 @@
 A fan-made conversational mentor experience inspired by Virat Kohli's competitive mindset, discipline, cricket mentality, fitness standards, and approach to pressure.
 
 The project combines a sports-game-inspired interface with local language-model inference, knowledge retrieval, text streaming, speech-to-text, and low-latency voice conversations.
-
-> **Disclaimer:** This is a fan-made project. It is not Virat Kohli and is not affiliated with, endorsed by, or officially connected to Virat Kohli. Any exact voice, likeness, or other protected identity assets should only be used where appropriately authorized or licensed.
-
----
-
 ## Current Features
 
 ### Text Chat
