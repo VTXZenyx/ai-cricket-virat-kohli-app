@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator
+from typing import Literal
 
 import httpx
 
@@ -12,6 +13,9 @@ from app.services.knowledge_service import (
 )
 
 
+ChatChannel = Literal["text", "voice"]
+
+
 def _demo_reply(message: str) -> str:
     return (
         "Come with intent. Tell me what you want to improve, "
@@ -19,7 +23,10 @@ def _demo_reply(message: str) -> str:
     )
 
 
-def _build_instructions(context: str) -> str:
+def _build_instructions(
+    context: str,
+    channel: ChatChannel = "text",
+) -> str:
     instructions = MENTOR_INSTRUCTIONS
 
     if context:
@@ -30,18 +37,33 @@ def _build_instructions(context: str) -> str:
             + context
         )
 
-    instructions += (
-        "\n\nRESPONSE LENGTH AND SPEED\n"
-        "- Answer the user's actual question immediately.\n"
-        "- Normal conversational replies should usually be 30 to 55 words.\n"
-        "- Use 2 to 3 sentences for normal replies.\n"
-        "- Hard maximum of about 70 words unless the user explicitly asks for detail.\n"
-        "- Finish the thought naturally. Do not stop halfway through a sentence.\n"
-        "- Do not repeat the same motivational point in different words.\n"
-        "- Prefer one strong, practical point over a long speech.\n"
-        "- Ask at most one short follow-up question when it genuinely helps.\n"
-        "- Give longer answers only when the user asks for explanation, detail, a plan, or multiple points.\n"
-    )
+    if channel == "voice":
+        instructions += (
+            "\n\nVOICE RESPONSE MODE\n"
+            "- Answer the user's actual question immediately.\n"
+            "- Speak naturally, like a real phone conversation.\n"
+            "- Normal replies should usually be about 25 to 45 words.\n"
+            "- Usually use 2 short sentences, occasionally 3.\n"
+            "- Do not repeat the user's question before answering.\n"
+            "- Finish every sentence naturally.\n"
+            "- Avoid long speeches, long lists, and repeated motivation.\n"
+            "- Prefer one strong practical point over a long explanation.\n"
+            "- Ask at most one short follow-up question when it genuinely helps.\n"
+            "- Give a longer reply only when the user clearly asks for detail.\n"
+        )
+    else:
+        instructions += (
+            "\n\nTEXT RESPONSE MODE\n"
+            "- Answer the user's actual question immediately.\n"
+            "- Normal conversational replies should usually be 30 to 55 words.\n"
+            "- Use 2 to 3 sentences for normal replies.\n"
+            "- Hard maximum of about 70 words unless the user explicitly asks for detail.\n"
+            "- Finish the thought naturally. Do not stop halfway through a sentence.\n"
+            "- Do not repeat the same motivational point in different words.\n"
+            "- Prefer one strong, practical point over a long speech.\n"
+            "- Ask at most one short follow-up question when it genuinely helps.\n"
+            "- Give longer answers only when the user asks for explanation, detail, a plan, or multiple points.\n"
+        )
 
     return instructions
 
@@ -96,8 +118,8 @@ def _ollama_payload(
             "top_p": 0.85,
             "repeat_penalty": 1.10,
 
-            # Enough room to finish naturally.
-            # The system prompt controls normal reply length.
+            # Keep enough room for the model to finish naturally.
+            # Text/voice length is controlled by the system prompt.
             "num_predict": 120,
         },
     }
@@ -109,10 +131,10 @@ async def _generate_with_ollama(
     instructions: str,
 ) -> str:
     """
-    Existing completed-response path.
+    Completed-response path.
 
-    Keep this for voice calls because Fish Audio currently
-    expects the complete AI response before generating audio.
+    Keep this available as a fallback while the
+    new streaming voice pipeline is being built.
     """
 
     messages = _build_messages(
@@ -146,8 +168,10 @@ async def _stream_with_ollama(
     instructions: str,
 ) -> AsyncIterator[str]:
     """
-    Streaming path used by the normal text chatbot.
-    Yields text as Ollama generates it.
+    Streaming Ollama response.
+
+    Used by normal text chat now and will also
+    be used by the low-latency voice pipeline.
     """
 
     messages = _build_messages(
@@ -188,6 +212,7 @@ async def _stream_with_ollama(
 async def prepare_streaming_reply(
     message: str,
     history: list[ChatTurn],
+    channel: ChatChannel = "text",
 ) -> tuple[AsyncIterator[str], str, int]:
     """
     Prepares knowledge/persona before the HTTP response begins.
@@ -202,7 +227,10 @@ async def prepare_streaming_reply(
 
     context = format_context(records)
 
-    instructions = _build_instructions(context)
+    instructions = _build_instructions(
+        context,
+        channel,
+    )
 
     if settings.ai_provider == "ollama":
         stream = _stream_with_ollama(
@@ -230,18 +258,23 @@ async def prepare_streaming_reply(
 async def generate_reply(
     message: str,
     history: list[ChatTurn],
+    channel: ChatChannel = "text",
 ) -> tuple[str, str, int]:
     """
     Existing non-streaming response.
 
-    This remains available for the voice-call pipeline.
+    Remains available as a fallback while the
+    low-latency voice pipeline is introduced.
     """
 
     records = await retrieve_knowledge(message)
 
     context = format_context(records)
 
-    instructions = _build_instructions(context)
+    instructions = _build_instructions(
+        context,
+        channel,
+    )
 
     if settings.ai_provider == "ollama":
         reply = await _generate_with_ollama(

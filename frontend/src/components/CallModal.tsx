@@ -988,7 +988,7 @@ export function CallModal({
        * in the ref so the next automatic
        * voice turn immediately sees it.
        */
-      historyRef.current = [
+      const nextHistory: VoiceTurn[] = [
         ...historyRef.current,
         {
           role: "user",
@@ -998,7 +998,10 @@ export function CallModal({
           role: "assistant",
           content: reply,
         },
-      ].slice(-6);
+      ];
+
+      historyRef.current =
+        nextHistory.slice(-6);
 
       console.log(
         "[voice] requesting Fish Audio"

@@ -31,9 +31,10 @@ async def chat(
     try:
         reply, provider, knowledge_used = (
             await generate_reply(
-                payload.message,
-                payload.history,
-            )
+                message=payload.message,
+                history=payload.history,
+                channel=payload.channel,
+                )
         )
 
         return ChatResponse(
@@ -63,9 +64,10 @@ async def chat_stream(
     try:
         stream, provider, knowledge_used = (
             await prepare_streaming_reply(
-                payload.message,
-                payload.history,
-            )
+    message=payload.message,
+    history=payload.history,
+    channel=payload.channel,
+)
         )
 
     except Exception as exc:
