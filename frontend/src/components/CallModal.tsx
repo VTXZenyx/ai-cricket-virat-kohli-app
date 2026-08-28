@@ -10,7 +10,12 @@ import {
 import {
   CallSession,
   endCall,
+  streamChat,
 } from "@/lib/api";
+
+import {
+  takeSpeakableSegments,
+} from "@/lib/voiceStreaming";
 
 type Props = {
   session: CallSession;
@@ -706,6 +711,99 @@ export function CallModal({
     return text;
   }
 
+  async function streamVoiceReply(
+    transcript: string,
+    signal: AbortSignal
+  ) {
+    let fullReply = "";
+    let sentenceBuffer = "";
+
+    console.log(
+      "[voice] Qwen stream started"
+    );
+
+    await streamChat(
+      transcript,
+      historyRef.current.slice(-6),
+      {
+        onMeta: (
+          provider,
+          knowledgeUsed
+        ) => {
+          console.log(
+            "[voice] Qwen stream meta:",
+            {
+              provider,
+              knowledgeUsed,
+            }
+          );
+        },
+
+        onToken: (token) => {
+          fullReply += token;
+          sentenceBuffer += token;
+
+          const result =
+            takeSpeakableSegments(
+              sentenceBuffer,
+              false
+            );
+
+          sentenceBuffer =
+            result.remainder;
+
+          for (
+            const sentence of
+            result.segments
+          ) {
+            console.log(
+              "[voice] sentence ready:",
+              sentence
+            );
+          }
+        },
+      },
+      {
+        channel: "voice",
+        signal,
+      }
+    );
+
+    /*
+     * Qwen may finish with useful text
+     * that has no final punctuation.
+     */
+    const finalResult =
+      takeSpeakableSegments(
+        sentenceBuffer,
+        true
+      );
+
+    for (
+      const sentence of
+      finalResult.segments
+    ) {
+      console.log(
+        "[voice] final sentence ready:",
+        sentence
+      );
+    }
+
+    const reply =
+      fullReply.trim();
+
+    if (!reply) {
+      throw new Error(
+        "The AI returned an empty response."
+      );
+    }
+
+    console.log(
+      "[voice] Qwen stream finished"
+    );
+
+    return reply;
+  }
 
   async function sendTranscriptToAI(
     transcript: string,
@@ -967,7 +1065,7 @@ export function CallModal({
       );
 
       const reply =
-        await sendTranscriptToAI(
+        await streamVoiceReply(
           transcript,
           controller.signal
         );
