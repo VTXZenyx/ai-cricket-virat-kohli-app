@@ -30,6 +30,10 @@ export type CallSession = {
   message: string | null;
 };
 
+export type ChatChannel =
+  | "text"
+  | "voice";
+
 type StreamChatHandlers = {
   onToken: (token: string) => void;
 
@@ -37,6 +41,11 @@ type StreamChatHandlers = {
     provider: Provider,
     knowledgeUsed: number
   ) => void;
+};
+
+type StreamChatOptions = {
+  channel?: ChatChannel;
+  signal?: AbortSignal;
 };
 
 const API_BASE =
@@ -48,7 +57,8 @@ async function readError(
   res: Response
 ): Promise<string> {
   try {
-    const body = await res.json();
+    const body =
+      await res.json();
 
     return (
       body.detail ||
@@ -65,22 +75,24 @@ export async function sendChat(
   message: string,
   history: ChatTurn[]
 ): Promise<ChatReply> {
-  const res = await fetch(
-    `${API_BASE}/api/chat`,
-    {
-      method: "POST",
+  const res =
+    await fetch(
+      `${API_BASE}/api/chat`,
+      {
+        method: "POST",
 
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
 
-      body: JSON.stringify({
-        message,
-        history,
-      }),
-    }
-  );
+        body: JSON.stringify({
+          message,
+          history,
+          channel: "text",
+        }),
+      }
+    );
 
   if (!res.ok) {
     throw new Error(
@@ -95,24 +107,33 @@ export async function sendChat(
 export async function streamChat(
   message: string,
   history: ChatTurn[],
-  handlers: StreamChatHandlers
+  handlers: StreamChatHandlers,
+  options: StreamChatOptions = {}
 ): Promise<void> {
-  const res = await fetch(
-    `${API_BASE}/api/chat/stream`,
-    {
-      method: "POST",
+  const res =
+    await fetch(
+      `${API_BASE}/api/chat/stream`,
+      {
+        method: "POST",
 
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
 
-      body: JSON.stringify({
-        message,
-        history,
-      }),
-    }
-  );
+        body: JSON.stringify({
+          message,
+          history,
+
+          channel:
+            options.channel ??
+            "text",
+        }),
+
+        signal:
+          options.signal,
+      }
+    );
 
   if (!res.ok) {
     throw new Error(
@@ -137,26 +158,34 @@ export async function streamChat(
   function processLine(
     rawLine: string
   ) {
-    const line = rawLine.trim();
+    const line =
+      rawLine.trim();
 
     if (!line) {
       return;
     }
 
-    const event = JSON.parse(line);
+    const event =
+      JSON.parse(line);
 
-    if (event.type === "meta") {
+    if (
+      event.type ===
+      "meta"
+    ) {
       handlers.onMeta?.(
         event.provider as Provider,
-        event.knowledge_used ?? 0
+        event.knowledge_used ??
+        0
       );
 
       return;
     }
 
     if (
-      event.type === "token" &&
-      typeof event.content === "string"
+      event.type ===
+      "token" &&
+      typeof event.content ===
+      "string"
     ) {
       handlers.onToken(
         event.content
@@ -165,33 +194,52 @@ export async function streamChat(
       return;
     }
 
-    if (event.type === "error") {
+    if (
+      event.type ===
+      "error"
+    ) {
       throw new Error(
         event.detail ||
         "AI stream failed."
       );
     }
+
+    /*
+     * "done" does not require
+     * any special handling here.
+     *
+     * The HTTP stream will finish
+     * immediately afterwards and
+     * streamChat() will resolve.
+     */
   }
 
   while (true) {
     const {
       done,
       value,
-    } = await reader.read();
+    } =
+      await reader.read();
 
     if (value) {
-      buffer += decoder.decode(
-        value,
-        {
-          stream: !done,
-        }
-      );
+      buffer +=
+        decoder.decode(
+          value,
+          {
+            stream:
+              !done,
+          }
+        );
     }
 
     let newlineIndex =
-      buffer.indexOf("\n");
+      buffer.indexOf(
+        "\n"
+      );
 
-    while (newlineIndex !== -1) {
+    while (
+      newlineIndex !== -1
+    ) {
       const line =
         buffer.slice(
           0,
@@ -206,7 +254,9 @@ export async function streamChat(
       processLine(line);
 
       newlineIndex =
-        buffer.indexOf("\n");
+        buffer.indexOf(
+          "\n"
+        );
     }
 
     if (done) {
@@ -218,7 +268,9 @@ export async function streamChat(
     buffer.trim();
 
   if (remainder) {
-    processLine(remainder);
+    processLine(
+      remainder
+    );
   }
 }
 
@@ -226,21 +278,22 @@ export async function streamChat(
 export async function startCall(
   mode: CallMode
 ): Promise<CallSession> {
-  const res = await fetch(
-    `${API_BASE}/api/calls/session`,
-    {
-      method: "POST",
+  const res =
+    await fetch(
+      `${API_BASE}/api/calls/session`,
+      {
+        method: "POST",
 
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
 
-      body: JSON.stringify({
-        mode,
-      }),
-    }
-  );
+        body: JSON.stringify({
+          mode,
+        }),
+      }
+    );
 
   if (!res.ok) {
     throw new Error(
@@ -255,14 +308,15 @@ export async function startCall(
 export async function endCall(
   conversationId: string
 ): Promise<void> {
-  const res = await fetch(
-    `${API_BASE}/api/calls/${encodeURIComponent(
-      conversationId
-    )}/end`,
-    {
-      method: "POST",
-    }
-  );
+  const res =
+    await fetch(
+      `${API_BASE}/api/calls/${encodeURIComponent(
+        conversationId
+      )}/end`,
+      {
+        method: "POST",
+      }
+    );
 
   if (!res.ok) {
     throw new Error(
@@ -278,21 +332,22 @@ export async function requestSpeech(
   audioUrl?: string;
   demo: boolean;
 }> {
-  const res = await fetch(
-    `${API_BASE}/api/tts`,
-    {
-      method: "POST",
+  const res =
+    await fetch(
+      `${API_BASE}/api/tts`,
+      {
+        method: "POST",
 
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
 
-      body: JSON.stringify({
-        text,
-      }),
-    }
-  );
+        body: JSON.stringify({
+          text,
+        }),
+      }
+    );
 
   if (!res.ok) {
     throw new Error(
@@ -306,14 +361,19 @@ export async function requestSpeech(
     ) || "";
 
   if (
-    contentType.includes("audio/")
+    contentType.includes(
+      "audio/"
+    )
   ) {
     const blob =
       await res.blob();
 
     return {
       audioUrl:
-        URL.createObjectURL(blob),
+        URL.createObjectURL(
+          blob
+        ),
+
       demo: false,
     };
   }
