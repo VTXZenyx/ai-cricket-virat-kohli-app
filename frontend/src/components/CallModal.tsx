@@ -1,7 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { CallSession, endCall } from "@/lib/api";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import {
+  CallSession,
+  endCall,
+} from "@/lib/api";
 
 type Props = {
   session: CallSession;
@@ -11,14 +20,46 @@ type Props = {
 type VoiceState =
   | "idle"
   | "listening"
+  | "user-speaking"
   | "thinking"
   | "speaking"
+  | "muted"
   | "error";
 
 type VoiceTurn = {
   role: "user" | "assistant";
   content: string;
 };
+
+/*
+ * Hands-free voice tuning.
+ *
+ * These values are deliberately kept here
+ * so we can tune them easily after testing
+ * with your actual microphone/environment.
+ */
+const SILENCE_TO_SEND_MS = 850;
+const MIN_VOICED_MS = 180;
+const MAX_UTTERANCE_MS = 30_000;
+
+const MIN_START_RMS = 0.012;
+const MIN_CONTINUE_RMS = 0.008;
+
+const START_THRESHOLD_MULTIPLIER = 2.4;
+const CONTINUE_THRESHOLD_MULTIPLIER = 1.5;
+
+const MAX_START_THRESHOLD = 0.06;
+const MAX_CONTINUE_THRESHOLD = 0.035;
+
+/*
+ * MediaRecorder gives us one chunk every 250ms.
+ * Keep roughly one second of audio before detected
+ * speech so the first syllable is not chopped off.
+ */
+const RECORDING_TIMESLICE_MS = 250;
+
+const LISTEN_AFTER_AI_DELAY_MS = 180;
+
 
 function formatTime(total: number) {
   const minutes = Math.floor(total / 60)
@@ -32,71 +73,201 @@ function formatTime(total: number) {
   return `${minutes}:${seconds}`;
 }
 
-export function CallModal({ session, onClose }: Props) {
-  const [seconds, setSeconds] = useState(0);
-  const [camera, setCamera] = useState(session.mode === "video");
-  const [ending, setEnding] = useState(false);
 
-  const [voiceState, setVoiceState] =
-    useState<VoiceState>("idle");
+export function CallModal({
+  session,
+  onClose,
+}: Props) {
+  const [seconds, setSeconds] =
+    useState(0);
 
-  const [voiceError, setVoiceError] =
-    useState<string | null>(null);
+  const [camera, setCamera] =
+    useState(
+      session.mode === "video"
+    );
 
-  const [latestTranscript, setLatestTranscript] =
+  const [ending, setEnding] =
+    useState(false);
+
+  const [
+    voiceState,
+    setVoiceState,
+  ] =
+    useState<VoiceState>(
+      "idle"
+    );
+
+  const [
+    voiceError,
+    setVoiceError,
+  ] =
+    useState<string | null>(
+      null
+    );
+
+  const [
+    latestTranscript,
+    setLatestTranscript,
+  ] =
     useState("");
 
-  const [history, setHistory] =
-    useState<VoiceTurn[]>([]);
+  const [muted, setMuted] =
+    useState(false);
+
+  /*
+   * Keep voice conversation history in a ref.
+   *
+   * This avoids stale React closures during the
+   * automatic listen → think → speak → listen loop.
+   */
+  const historyRef =
+    useRef<VoiceTurn[]>([]);
+
+  const callActiveRef =
+    useRef(true);
+
+  const endingRef =
+    useRef(false);
+
+  const mutedRef =
+    useRef(false);
+
+  const processingRef =
+    useRef(false);
+
+  const startingListeningRef =
+    useRef(false);
 
   const mediaRecorderRef =
-    useRef<MediaRecorder | null>(null);
+    useRef<MediaRecorder | null>(
+      null
+    );
 
   const streamRef =
-    useRef<MediaStream | null>(null);
+    useRef<MediaStream | null>(
+      null
+    );
 
   const audioChunksRef =
     useRef<Blob[]>([]);
 
-  const audioContextRef =
-    useRef<AudioContext | null>(null);
-
-  const audioSourceRef =
-    useRef<AudioBufferSourceNode | null>(null);
-
   const shouldProcessRecordingRef =
     useRef(false);
 
-  const isVideo = session.mode === "video";
+  const speechDetectedRef =
+    useRef(false);
+
+  const audioContextRef =
+    useRef<AudioContext | null>(
+      null
+    );
+
+  const audioSourceRef =
+    useRef<AudioBufferSourceNode | null>(
+      null
+    );
+
+  const analyserRef =
+    useRef<AnalyserNode | null>(
+      null
+    );
+
+  const micSourceRef =
+    useRef<MediaStreamAudioSourceNode | null>(
+      null
+    );
+
+  const vadFrameRef =
+    useRef<number | null>(
+      null
+    );
+
+  const listenTimerRef =
+    useRef<number | null>(
+      null
+    );
+
+  const currentRequestRef =
+    useRef<AbortController | null>(
+      null
+    );
+
+  const isVideo =
+    session.mode === "video";
 
   const apiBase =
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
+    process.env
+      .NEXT_PUBLIC_API_BASE_URL ??
     "http://127.0.0.1:8000";
 
+
+  /*
+   * Call timer.
+   */
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setSeconds((value) => value + 1);
-    }, 1000);
+    const timer =
+      window.setInterval(() => {
+        setSeconds(
+          (value) => value + 1
+        );
+      }, 1000);
 
     return () => {
-      window.clearInterval(timer);
+      window.clearInterval(
+        timer
+      );
     };
   }, []);
 
+
+  /*
+   * Hands-free voice initialization.
+   *
+   * The moment the Voice Call modal opens,
+   * we start preparing the microphone.
+   *
+   * No second MIC click is required.
+   */
   useEffect(() => {
+    callActiveRef.current = true;
+    endingRef.current = false;
+
+    if (!isVideo) {
+      void startListeningTurn();
+    }
+
     return () => {
-      cleanupMicrophone();
+      callActiveRef.current =
+        false;
+
+      endingRef.current = true;
+
+      cancelListenTimer();
+
+      currentRequestRef.current?.abort();
+
+      currentRequestRef.current =
+        null;
+
+      releaseMicrophone();
+
       stopCurrentAudio();
 
-      /*
-       * Do not close the AudioContext here.
-       *
-       * During development React/Next can remount components,
-       * and an async Whisper/Qwen/Fish request may still be
-       * finishing. The context is closed deliberately in leave().
-       */
+      const context =
+        audioContextRef.current;
+
+      audioContextRef.current =
+        null;
+
+      if (
+        context &&
+        context.state !== "closed"
+      ) {
+        void context.close();
+      }
     };
-  }, []);
+  }, [isVideo]);
+
 
   const label = useMemo(
     () =>
@@ -106,168 +277,392 @@ export function CallModal({ session, onClose }: Props) {
     [isVideo]
   );
 
-  const statusText = useMemo(() => {
-    if (isVideo) {
-      return session.demo
-        ? "Demo connected"
-        : "Connected";
-    }
 
-    if (voiceState === "listening") {
-      return "Listening...";
-    }
+  const statusText =
+    useMemo(() => {
+      if (isVideo) {
+        return session.demo
+          ? "Demo connected"
+          : "Connected";
+      }
 
-    if (voiceState === "thinking") {
-      return "Thinking...";
-    }
+      if (
+        voiceState ===
+        "listening"
+      ) {
+        return "Listening...";
+      }
 
-    if (voiceState === "speaking") {
-      return "AI Virat is speaking...";
-    }
+      if (
+        voiceState ===
+        "user-speaking"
+      ) {
+        return "Hearing you...";
+      }
 
-    if (voiceState === "error") {
-      return "Voice error";
-    }
+      if (
+        voiceState ===
+        "thinking"
+      ) {
+        return "Thinking...";
+      }
 
-    return "Ready to talk";
-  }, [isVideo, session.demo, voiceState]);
+      if (
+        voiceState ===
+        "speaking"
+      ) {
+        return "AI Virat is speaking...";
+      }
 
-  function cleanupMicrophone() {
-    shouldProcessRecordingRef.current = false;
+      if (
+        voiceState ===
+        "muted"
+      ) {
+        return "Muted";
+      }
 
-    const recorder = mediaRecorderRef.current;
+      if (
+        voiceState ===
+        "error"
+      ) {
+        return "Voice error";
+      }
 
+      return "Connecting microphone...";
+    }, [
+      isVideo,
+      session.demo,
+      voiceState,
+    ]);
+
+
+  function cancelListenTimer() {
     if (
-      recorder &&
-      recorder.state !== "inactive"
+      listenTimerRef.current !==
+      null
     ) {
-      recorder.stop();
-    }
+      window.clearTimeout(
+        listenTimerRef.current
+      );
 
-    mediaRecorderRef.current = null;
-
-    if (streamRef.current) {
-      streamRef.current
-        .getTracks()
-        .forEach((track) => track.stop());
-
-      streamRef.current = null;
+      listenTimerRef.current =
+        null;
     }
   }
 
-  function stopCurrentAudio() {
-    const source = audioSourceRef.current;
 
-    if (!source) {
+  function scheduleListening(
+    delay =
+      LISTEN_AFTER_AI_DELAY_MS
+  ) {
+    cancelListenTimer();
+
+    if (
+      !callActiveRef.current ||
+      endingRef.current ||
+      mutedRef.current ||
+      processingRef.current
+    ) {
       return;
     }
 
-    try {
-      source.stop();
-    } catch {
-      // Source may already have finished.
-    }
+    listenTimerRef.current =
+      window.setTimeout(() => {
+        listenTimerRef.current =
+          null;
 
-    try {
-      source.disconnect();
-    } catch {
-      // Source may already be disconnected.
-    }
-
-    audioSourceRef.current = null;
+        void startListeningTurn();
+      }, delay);
   }
+
 
   function getAudioContext() {
     if (
       !audioContextRef.current ||
-      audioContextRef.current.state === "closed"
+      audioContextRef.current
+        .state === "closed"
     ) {
       audioContextRef.current =
         new AudioContext();
+
+      /*
+       * Nodes from an old AudioContext
+       * cannot be reused.
+       */
+      analyserRef.current =
+        null;
+
+      micSourceRef.current =
+        null;
     }
 
     return audioContextRef.current;
   }
 
+
   async function unlockAudio() {
-    const context = getAudioContext();
+    const context =
+      getAudioContext();
 
-    if (context.state === "suspended") {
+    if (
+      context.state ===
+      "suspended"
+    ) {
       await context.resume();
     }
+
+    return context;
   }
 
-  async function speakText(text: string) {
-    const response = await fetch(
-      `${apiBase}/api/tts`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text,
-        }),
-      }
-    );
 
-    if (!response.ok) {
-      const errorText =
-        await response.text();
-
-      throw new Error(
-        errorText ||
-        "Voice generation failed."
-      );
-    }
-
-    const context = getAudioContext();
-
-    if (context.state === "suspended") {
-      await context.resume();
-    }
-
-    stopCurrentAudio();
-
-    const audioData =
-      await response.arrayBuffer();
-
-    const audioBuffer =
-      await context.decodeAudioData(
-        audioData
-      );
-
+  function stopCurrentAudio() {
     const source =
-      context.createBufferSource();
+      audioSourceRef.current;
 
-    source.buffer = audioBuffer;
-    source.connect(context.destination);
+    if (!source) {
+      return;
+    }
 
-    audioSourceRef.current = source;
+    /*
+     * Remove the callback first.
+     *
+     * Otherwise manually stopping audio
+     * could accidentally trigger another
+     * automatic microphone turn.
+     */
+    source.onended = null;
 
-    source.onended = () => {
-      if (
-        audioSourceRef.current === source
-      ) {
-        audioSourceRef.current = null;
+    audioSourceRef.current =
+      null;
+
+    try {
+      source.stop();
+    } catch {
+      // Already finished.
+    }
+
+    try {
+      source.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }
+
+
+  function stopVad() {
+    if (
+      vadFrameRef.current !==
+      null
+    ) {
+      cancelAnimationFrame(
+        vadFrameRef.current
+      );
+
+      vadFrameRef.current =
+        null;
+    }
+  }
+
+
+  function setMicrophoneEnabled(
+    enabled: boolean
+  ) {
+    const stream =
+      streamRef.current;
+
+    if (!stream) {
+      return;
+    }
+
+    stream
+      .getAudioTracks()
+      .forEach((track) => {
+        track.enabled = enabled;
+      });
+  }
+
+
+  function releaseMicrophone() {
+    shouldProcessRecordingRef.current =
+      false;
+
+    speechDetectedRef.current =
+      false;
+
+    stopVad();
+
+    const recorder =
+      mediaRecorderRef.current;
+
+    mediaRecorderRef.current =
+      null;
+
+    if (
+      recorder &&
+      recorder.state !==
+      "inactive"
+    ) {
+      /*
+       * Prevent recorder cleanup from
+       * starting another AI request.
+       */
+      recorder.onstop = null;
+
+      try {
+        recorder.stop();
+      } catch {
+        // Recorder may already be stopping.
+      }
+    }
+
+    if (
+      micSourceRef.current
+    ) {
+      try {
+        micSourceRef.current.disconnect();
+      } catch {
+        // Already disconnected.
       }
 
-      setVoiceState("idle");
-    };
+      micSourceRef.current =
+        null;
+    }
 
-    setVoiceState("speaking");
+    analyserRef.current =
+      null;
 
-    source.start(0);
+    if (streamRef.current) {
+      streamRef.current
+        .getTracks()
+        .forEach((track) => {
+          track.stop();
+        });
+
+      streamRef.current =
+        null;
+    }
   }
+
+
+  async function ensureMicrophone() {
+    let stream =
+      streamRef.current;
+
+    const existingTrack =
+      stream
+        ?.getAudioTracks()
+        .find(
+          (track) =>
+            track.readyState ===
+            "live"
+        );
+
+    if (!stream || !existingTrack) {
+      stream =
+        await navigator
+          .mediaDevices
+          .getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+          });
+
+      if (
+        !callActiveRef.current ||
+        endingRef.current
+      ) {
+        stream
+          .getTracks()
+          .forEach((track) =>
+            track.stop()
+          );
+
+        throw new Error(
+          "Call ended."
+        );
+      }
+
+      streamRef.current =
+        stream;
+    }
+
+    const context =
+      getAudioContext();
+
+    if (
+      !micSourceRef.current ||
+      !analyserRef.current
+    ) {
+      const source =
+        context
+          .createMediaStreamSource(
+            stream
+          );
+
+      const analyser =
+        context.createAnalyser();
+
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant =
+        0.15;
+
+      source.connect(analyser);
+
+      micSourceRef.current =
+        source;
+
+      analyserRef.current =
+        analyser;
+    }
+
+    return stream;
+  }
+
+
+  async function readApiError(
+    response: Response
+  ) {
+    try {
+      const data =
+        await response.json();
+
+      if (
+        typeof data.detail ===
+        "string"
+      ) {
+        return data.detail;
+      }
+
+      if (
+        typeof data.message ===
+        "string"
+      ) {
+        return data.message;
+      }
+
+      return `Request failed (${response.status})`;
+    } catch {
+      return `Request failed (${response.status})`;
+    }
+  }
+
 
   async function sendAudioToWhisper(
     audioBlob: Blob,
-    extension: string
+    extension: string,
+    signal: AbortSignal
   ) {
-    setVoiceState("thinking");
+    setVoiceState(
+      "thinking"
+    );
+
     setVoiceError(null);
 
-    const formData = new FormData();
+    const formData =
+      new FormData();
 
     formData.append(
       "audio",
@@ -275,99 +670,326 @@ export function CallModal({ session, onClose }: Props) {
       `voice-call.${extension}`
     );
 
-    const response = await fetch(
-      `${apiBase}/api/stt`,
-      {
-        method: "POST",
-        body: formData,
-      }
-    );
+    const response =
+      await fetch(
+        `${apiBase}/api/stt`,
+        {
+          method: "POST",
+          body: formData,
+          signal,
+        }
+      );
 
     if (!response.ok) {
-      const errorText =
-        await response.text();
-
       throw new Error(
-        errorText ||
-        "Speech recognition failed."
+        await readApiError(
+          response
+        )
       );
     }
 
-    const data = await response.json();
+    const data =
+      await response.json();
 
-    return data.text as string;
+    const text =
+      typeof data.text ===
+        "string"
+        ? data.text.trim()
+        : "";
+
+    if (!text) {
+      throw new Error(
+        "No speech was detected."
+      );
+    }
+
+    return text;
   }
+
 
   async function sendTranscriptToAI(
-    transcript: string
+    transcript: string,
+    signal: AbortSignal
   ) {
-    const response = await fetch(
-      `${apiBase}/api/chat`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":
-            "application/json",
-        },
-        body: JSON.stringify({
-          message: transcript,
-          history,
-        }),
-      }
-    );
+    const response =
+      await fetch(
+        `${apiBase}/api/chat`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            message:
+              transcript,
+
+            /*
+             * Keep voice context small
+             * and consistent with the
+             * optimized backend.
+             */
+            history:
+              historyRef.current.slice(
+                -6
+              ),
+          }),
+          signal,
+        }
+      );
 
     if (!response.ok) {
-      const errorText =
-        await response.text();
-
       throw new Error(
-        errorText ||
-        "AI response failed."
+        await readApiError(
+          response
+        )
       );
     }
 
-    const data = await response.json();
+    const data =
+      await response.json();
 
-    return data.reply as string;
+    const reply =
+      typeof data.reply ===
+        "string"
+        ? data.reply.trim()
+        : "";
+
+    if (!reply) {
+      throw new Error(
+        "The AI returned an empty response."
+      );
+    }
+
+    return reply;
   }
+
+
+  async function speakText(
+    text: string,
+    signal: AbortSignal
+  ) {
+    const response =
+      await fetch(
+        `${apiBase}/api/tts`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            text,
+          }),
+          signal,
+        }
+      );
+
+    if (!response.ok) {
+      throw new Error(
+        await readApiError(
+          response
+        )
+      );
+    }
+
+    if (
+      !callActiveRef.current ||
+      endingRef.current
+    ) {
+      return;
+    }
+
+    const context =
+      await unlockAudio();
+
+    if (
+      context.state !==
+      "running"
+    ) {
+      throw new Error(
+        "Browser audio is paused. Press RETRY once to enable call audio."
+      );
+    }
+
+    stopCurrentAudio();
+
+    const audioData =
+      await response.arrayBuffer();
+
+    if (
+      !callActiveRef.current ||
+      endingRef.current
+    ) {
+      return;
+    }
+
+    const audioBuffer =
+      await context
+        .decodeAudioData(
+          audioData
+        );
+
+    if (
+      !callActiveRef.current ||
+      endingRef.current
+    ) {
+      return;
+    }
+
+    const source =
+      context
+        .createBufferSource();
+
+    source.buffer =
+      audioBuffer;
+
+    source.connect(
+      context.destination
+    );
+
+    audioSourceRef.current =
+      source;
+
+    /*
+     * The microphone stays disabled
+     * while AI audio plays.
+     *
+     * This prevents the AI from
+     * hearing its own Fish Audio
+     * response through the speakers.
+     */
+    setMicrophoneEnabled(
+      false
+    );
+
+    setVoiceState(
+      "speaking"
+    );
+
+    source.onended = () => {
+      if (
+        audioSourceRef.current !==
+        source
+      ) {
+        return;
+      }
+
+      audioSourceRef.current =
+        null;
+
+      try {
+        source.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+
+      processingRef.current =
+        false;
+
+      if (
+        !callActiveRef.current ||
+        endingRef.current
+      ) {
+        return;
+      }
+
+      if (
+        mutedRef.current
+      ) {
+        setVoiceState(
+          "muted"
+        );
+
+        return;
+      }
+
+      /*
+       * AI finished speaking.
+       * Automatically listen again.
+       */
+      scheduleListening();
+    };
+
+    source.start(0);
+  }
+
 
   async function processRecording(
     audioBlob: Blob,
     extension: string
   ) {
-    try {
-      setVoiceError(null);
-      setVoiceState("thinking");
+    if (
+      !callActiveRef.current ||
+      endingRef.current
+    ) {
+      processingRef.current =
+        false;
 
-      console.log("[voice] sending audio to Whisper");
+      return;
+    }
+
+    const controller =
+      new AbortController();
+
+    currentRequestRef.current =
+      controller;
+
+    try {
+      console.log(
+        "[voice] sending audio to Whisper"
+      );
 
       const transcript =
         await sendAudioToWhisper(
           audioBlob,
-          extension
+          extension,
+          controller.signal
         );
+
+      if (
+        !callActiveRef.current
+      ) {
+        return;
+      }
 
       console.log(
         "[voice] transcript:",
         transcript
       );
 
-      setLatestTranscript(transcript);
+      setLatestTranscript(
+        transcript
+      );
 
-      console.log("[voice] sending transcript to AI");
+      console.log(
+        "[voice] sending transcript to AI"
+      );
 
       const reply =
         await sendTranscriptToAI(
-          transcript
+          transcript,
+          controller.signal
         );
+
+      if (
+        !callActiveRef.current
+      ) {
+        return;
+      }
 
       console.log(
         "[voice] AI reply:",
         reply
       );
 
-      setHistory((previous) => [
-        ...previous,
+      /*
+       * Update history synchronously
+       * in the ref so the next automatic
+       * voice turn immediately sees it.
+       */
+      historyRef.current = [
+        ...historyRef.current,
         {
           role: "user",
           content: transcript,
@@ -376,42 +998,501 @@ export function CallModal({ session, onClose }: Props) {
           role: "assistant",
           content: reply,
         },
-      ]);
+      ].slice(-6);
 
-      console.log("[voice] requesting Fish Audio");
+      console.log(
+        "[voice] requesting Fish Audio"
+      );
 
-      await speakText(reply);
+      await speakText(
+        reply,
+        controller.signal
+      );
 
-      console.log("[voice] Fish audio started");
+      console.log(
+        "[voice] Fish audio started"
+      );
+
+      currentRequestRef.current =
+        null;
+
+      /*
+       * Do NOT set processing=false here.
+       *
+       * The turn is still active while
+       * Fish Audio is speaking.
+       *
+       * source.onended handles that.
+       */
     } catch (error) {
+      currentRequestRef.current =
+        null;
+
+      if (
+        !callActiveRef.current ||
+        endingRef.current
+      ) {
+        processingRef.current =
+          false;
+
+        return;
+      }
+
+      if (
+        error instanceof DOMException &&
+        error.name ===
+        "AbortError"
+      ) {
+        processingRef.current =
+          false;
+
+        return;
+      }
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Something went wrong during the call.";
+
+      /*
+       * VAD should prevent almost all
+       * empty recordings, but Whisper can
+       * occasionally reject one anyway.
+       *
+       * Don't expose an ugly error.
+       * Just listen again automatically.
+       */
+      if (
+        message
+          .toLowerCase()
+          .includes(
+            "no speech was detected"
+          )
+      ) {
+        console.log(
+          "[voice] Whisper found no speech; listening again"
+        );
+
+        processingRef.current =
+          false;
+
+        setVoiceError(null);
+
+        if (
+          mutedRef.current
+        ) {
+          setVoiceState(
+            "muted"
+          );
+        } else {
+          scheduleListening(
+            150
+          );
+        }
+
+        return;
+      }
+
       console.error(
         "Voice call error:",
         error
       );
 
-      setVoiceState("error");
+      processingRef.current =
+        false;
+
+      setVoiceState(
+        "error"
+      );
 
       setVoiceError(
-        error instanceof Error
-          ? error.message
-          : "Something went wrong during the call."
+        message
       );
     }
   }
 
-  async function startListening() {
+
+  function stopCurrentTurn(
+    shouldProcess: boolean
+  ) {
+    stopVad();
+
+    const recorder =
+      mediaRecorderRef.current;
+
+    if (
+      !recorder ||
+      recorder.state !==
+      "recording"
+    ) {
+      return;
+    }
+
+    shouldProcessRecordingRef.current =
+      shouldProcess;
+
+    if (shouldProcess) {
+      processingRef.current =
+        true;
+
+      setVoiceState(
+        "thinking"
+      );
+    }
+
+    try {
+      recorder.stop();
+    } catch (error) {
+      console.error(
+        "Recorder stop error:",
+        error
+      );
+    }
+  }
+
+
+  function cancelListeningTurn() {
+    shouldProcessRecordingRef.current =
+      false;
+
+    speechDetectedRef.current =
+      false;
+
+    stopVad();
+
+    const recorder =
+      mediaRecorderRef.current;
+
+    if (
+      recorder &&
+      recorder.state ===
+      "recording"
+    ) {
+      try {
+        recorder.stop();
+      } catch {
+        // Recorder may already be stopping.
+      }
+    }
+  }
+
+
+  function startVoiceActivityDetection(
+    recorder: MediaRecorder
+  ) {
+    stopVad();
+
+    const analyser =
+      analyserRef.current;
+
+    if (!analyser) {
+      throw new Error(
+        "Microphone analyser is not available."
+      );
+    }
+
+    const samples =
+      new Float32Array(
+        analyser.fftSize
+      );
+
+    let speechDetected =
+      false;
+
+    let speechStartedAt =
+      0;
+
+    let lastVoiceAt =
+      0;
+
+    let voicedMs = 0;
+
+    let previousFrameAt =
+      performance.now();
+
+    /*
+     * Starting noise-floor estimate.
+     * It adapts while the user is silent.
+     */
+    let noiseFloor =
+      0.006;
+
+    speechDetectedRef.current =
+      false;
+
+    const tick = () => {
+      if (
+        !callActiveRef.current ||
+        endingRef.current ||
+        mutedRef.current ||
+        mediaRecorderRef.current !==
+        recorder ||
+        recorder.state !==
+        "recording"
+      ) {
+        vadFrameRef.current =
+          null;
+
+        return;
+      }
+
+      const now =
+        performance.now();
+
+      const frameDuration =
+        Math.min(
+          now -
+          previousFrameAt,
+          100
+        );
+
+      previousFrameAt =
+        now;
+
+      analyser
+        .getFloatTimeDomainData(
+          samples
+        );
+
+      let sumSquares = 0;
+
+      for (
+        let i = 0;
+        i < samples.length;
+        i += 1
+      ) {
+        const sample =
+          samples[i];
+
+        sumSquares +=
+          sample * sample;
+      }
+
+      const rms =
+        Math.sqrt(
+          sumSquares /
+          samples.length
+        );
+
+      if (!speechDetected) {
+        /*
+         * Adapt background-noise level
+         * while the user is silent.
+         *
+         * Ignore unusually loud spikes
+         * so one click doesn't permanently
+         * raise the threshold.
+         */
+        if (rms < 0.05) {
+          noiseFloor =
+            noiseFloor *
+            0.96 +
+            rms * 0.04;
+        }
+
+        const startThreshold =
+          Math.min(
+            MAX_START_THRESHOLD,
+            Math.max(
+              MIN_START_RMS,
+              noiseFloor *
+              START_THRESHOLD_MULTIPLIER
+            )
+          );
+
+        if (
+          rms >=
+          startThreshold
+        ) {
+          speechDetected =
+            true;
+
+          speechDetectedRef.current =
+            true;
+
+          speechStartedAt =
+            now;
+
+          lastVoiceAt =
+            now;
+
+          voicedMs +=
+            frameDuration;
+
+          console.log(
+            "[voice] speech detected"
+          );
+
+          setVoiceState(
+            "user-speaking"
+          );
+        }
+      } else {
+        const continueThreshold =
+          Math.min(
+            MAX_CONTINUE_THRESHOLD,
+            Math.max(
+              MIN_CONTINUE_RMS,
+              noiseFloor *
+              CONTINUE_THRESHOLD_MULTIPLIER
+            )
+          );
+
+        if (
+          rms >=
+          continueThreshold
+        ) {
+          lastVoiceAt =
+            now;
+
+          voicedMs +=
+            frameDuration;
+        }
+
+        const silenceDuration =
+          now - lastVoiceAt;
+
+        const utteranceDuration =
+          now -
+          speechStartedAt;
+
+        /*
+         * Safety limit so one extremely
+         * long turn cannot record forever.
+         */
+        if (
+          utteranceDuration >=
+          MAX_UTTERANCE_MS
+        ) {
+          console.log(
+            "[voice] max utterance reached; submitting"
+          );
+
+          stopCurrentTurn(
+            true
+          );
+
+          return;
+        }
+
+        if (
+          silenceDuration >=
+          SILENCE_TO_SEND_MS
+        ) {
+          if (
+            voicedMs >=
+            MIN_VOICED_MS
+          ) {
+            console.log(
+              "[voice] silence detected; submitting turn"
+            );
+
+            stopCurrentTurn(
+              true
+            );
+
+            return;
+          }
+
+          /*
+           * Very short noise/click.
+           *
+           * Reset instead of sending
+           * garbage to Whisper.
+           */
+          speechDetected =
+            false;
+
+          speechDetectedRef.current =
+            false;
+
+          speechStartedAt =
+            0;
+
+          lastVoiceAt =
+            0;
+
+          voicedMs = 0;
+
+          setVoiceState(
+            "listening"
+          );
+        }
+      }
+
+      vadFrameRef.current =
+        requestAnimationFrame(
+          tick
+        );
+    };
+
+    vadFrameRef.current =
+      requestAnimationFrame(
+        tick
+      );
+  }
+
+
+  async function startListeningTurn() {
+    if (
+      isVideo ||
+      !callActiveRef.current ||
+      endingRef.current ||
+      mutedRef.current ||
+      processingRef.current ||
+      startingListeningRef.current
+    ) {
+      return;
+    }
+
+    const existingRecorder =
+      mediaRecorderRef.current;
+
+    if (
+      existingRecorder &&
+      existingRecorder.state ===
+      "recording"
+    ) {
+      return;
+    }
+
+    startingListeningRef.current =
+      true;
+
     try {
       setVoiceError(null);
-      setLatestTranscript("");
-
-      stopCurrentAudio();
 
       const stream =
-        await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
+        await ensureMicrophone();
 
-      streamRef.current = stream;
+      if (
+        !callActiveRef.current ||
+        endingRef.current ||
+        mutedRef.current
+      ) {
+        return;
+      }
+
+      const context =
+        await unlockAudio();
+
+      /*
+       * If autoplay policy blocks the first
+       * automatic audio setup, RETRY gives
+       * the browser a direct user gesture.
+       */
+      if (
+        context.state !==
+        "running"
+      ) {
+        throw new Error(
+          "Browser audio is paused. Press RETRY once to enable the call."
+        );
+      }
+
+      setMicrophoneEnabled(
+        true
+      );
 
       const supportedTypes = [
         "audio/webm;codecs=opus",
@@ -420,32 +1501,56 @@ export function CallModal({ session, onClose }: Props) {
       ];
 
       const mimeType =
-        supportedTypes.find((type) =>
-          MediaRecorder.isTypeSupported(type)
+        supportedTypes.find(
+          (type) =>
+            MediaRecorder
+              .isTypeSupported(
+                type
+              )
         );
 
-      const recorder = mimeType
-        ? new MediaRecorder(stream, {
-          mimeType,
-        })
-        : new MediaRecorder(stream);
+      const recorder =
+        mimeType
+          ? new MediaRecorder(
+            stream,
+            {
+              mimeType,
+            }
+          )
+          : new MediaRecorder(
+            stream
+          );
 
       mediaRecorderRef.current =
         recorder;
 
-      audioChunksRef.current = [];
+      audioChunksRef.current =
+        [];
 
-      recorder.ondataavailable = (
-        event
-      ) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(
-            event.data
-          );
+      speechDetectedRef.current =
+        false;
+
+      shouldProcessRecordingRef.current =
+        false;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size <= 0) {
+          return;
         }
-      };
 
+        /*
+         * Keep every chunk from this MediaRecorder session.
+         *
+         * IMPORTANT:
+         * The first WebM chunk contains the EBML/container
+         * header that FFmpeg needs. Removing early chunks
+         * makes the resulting WebM invalid.
+         */
+        audioChunksRef.current.push(event.data);
+      };
       recorder.onstop = () => {
+        stopVad();
+
         const shouldProcess =
           shouldProcessRecordingRef.current;
 
@@ -458,140 +1563,299 @@ export function CallModal({ session, onClose }: Props) {
           "audio/webm";
 
         const extension =
-          finalMimeType.includes("mp4")
+          finalMimeType.includes(
+            "mp4"
+          )
             ? "m4a"
             : "webm";
 
-        const audioBlob = new Blob(
-          audioChunksRef.current,
-          {
-            type: finalMimeType,
-          }
+        const audioBlob =
+          new Blob(
+            audioChunksRef.current,
+            {
+              type:
+                finalMimeType,
+            }
+          );
+
+        audioChunksRef.current =
+          [];
+
+        speechDetectedRef.current =
+          false;
+
+        if (
+          mediaRecorderRef.current ===
+          recorder
+        ) {
+          mediaRecorderRef.current =
+            null;
+        }
+
+        /*
+         * Stop collecting the mic while
+         * Whisper/Qwen/Fish are working.
+         *
+         * We keep the MediaStream alive,
+         * but disable the audio track.
+         */
+        setMicrophoneEnabled(
+          false
         );
-
-        stream
-          .getTracks()
-          .forEach((track) => {
-            track.stop();
-          });
-
-        streamRef.current = null;
-        mediaRecorderRef.current = null;
 
         if (
           shouldProcess &&
-          audioBlob.size > 0
+          audioBlob.size > 0 &&
+          callActiveRef.current &&
+          !endingRef.current
         ) {
           void processRecording(
             audioBlob,
             extension
           );
+
+          return;
+        }
+
+        processingRef.current =
+          false;
+
+        if (
+          callActiveRef.current &&
+          !endingRef.current &&
+          !mutedRef.current
+        ) {
+          scheduleListening(
+            100
+          );
         }
       };
 
-      shouldProcessRecordingRef.current =
+      recorder.onerror = (
+        event
+      ) => {
+        console.error(
+          "MediaRecorder error:",
+          event
+        );
+
+        stopVad();
+
+        processingRef.current =
+          false;
+
+        setVoiceState(
+          "error"
+        );
+
+        setVoiceError(
+          "The microphone recording stopped unexpectedly. Press RETRY."
+        );
+      };
+
+      recorder.start(
+        RECORDING_TIMESLICE_MS
+      );
+
+      setVoiceState(
+        "listening"
+      );
+
+      startVoiceActivityDetection(
+        recorder
+      );
+
+      console.log(
+        "[voice] hands-free listening started"
+      );
+    } catch (error) {
+      if (
+        !callActiveRef.current ||
+        endingRef.current
+      ) {
+        return;
+      }
+
+      console.error(
+        "Microphone startup error:",
+        error
+      );
+
+      processingRef.current =
         false;
 
-      recorder.start();
-
-      setVoiceState("listening");
-    } catch (error) {
-      console.error(
-        "Microphone error:",
-        error
+      setVoiceState(
+        "error"
       );
-
-      setVoiceState("error");
 
       setVoiceError(
-        "Microphone permission was denied or the microphone could not be opened."
+        error instanceof Error
+          ? error.message
+          : "Microphone permission was denied or the microphone could not be opened."
       );
+    } finally {
+      startingListeningRef.current =
+        false;
     }
   }
 
-  function stopListening() {
-    const recorder =
-      mediaRecorderRef.current;
 
+  async function handleVoiceControl() {
+    /*
+     * Error mode becomes RETRY.
+     *
+     * This is also useful if the browser
+     * requires a direct interaction before
+     * allowing Web Audio playback.
+     */
     if (
-      recorder &&
-      recorder.state === "recording"
+      voiceState ===
+      "error"
     ) {
-      shouldProcessRecordingRef.current =
-        true;
+      mutedRef.current =
+        false;
 
-      setVoiceState("thinking");
+      setMuted(false);
 
-      recorder.stop();
-    }
-  }
+      setVoiceError(null);
 
-  async function handleMic() {
-    if (
-      voiceState === "listening"
-    ) {
-      stopListening();
+      try {
+        await unlockAudio();
+      } catch {
+        // startListeningTurn will display
+        // a useful error if needed.
+      }
+
+      await startListeningTurn();
+
       return;
     }
 
-    if (voiceState !== "idle") {
+    /*
+     * UNMUTE
+     */
+    if (mutedRef.current) {
+      mutedRef.current =
+        false;
+
+      setMuted(false);
+
+      setVoiceError(null);
+
+      setMicrophoneEnabled(
+        true
+      );
+
+      try {
+        await unlockAudio();
+      } catch {
+        // Handled below if listening fails.
+      }
+
+      if (
+        !processingRef.current &&
+        !audioSourceRef.current
+      ) {
+        await startListeningTurn();
+      }
+
       return;
     }
 
-    try {
-      /*
-       * This happens directly from the user's
-       * MIC click, which unlocks browser audio.
-       */
-      await unlockAudio();
+    /*
+     * MUTE
+     */
+    mutedRef.current =
+      true;
 
-      await startListening();
-    } catch (error) {
-      console.error(
-        "Audio setup error:",
-        error
-      );
+    setMuted(true);
 
-      setVoiceState("error");
+    cancelListenTimer();
 
-      setVoiceError(
-        "Audio could not start. Please allow microphone and audio access."
+    cancelListeningTurn();
+
+    setMicrophoneEnabled(
+      false
+    );
+
+    if (
+      voiceState !==
+      "thinking" &&
+      voiceState !==
+      "speaking"
+    ) {
+      setVoiceState(
+        "muted"
       );
     }
   }
+
 
   async function leave() {
-    if (ending) {
+    if (
+      endingRef.current
+    ) {
       return;
     }
+
+    endingRef.current =
+      true;
+
+    callActiveRef.current =
+      false;
 
     setEnding(true);
 
-    cleanupMicrophone();
+    cancelListenTimer();
+
+    currentRequestRef.current?.abort();
+
+    currentRequestRef.current =
+      null;
+
+    processingRef.current =
+      false;
+
+    releaseMicrophone();
+
     stopCurrentAudio();
 
-    if (audioContextRef.current) {
-      try {
-        await audioContextRef.current.close();
-      } catch {
-        // Context may already be closed.
-      }
+    const context =
+      audioContextRef.current;
 
-      audioContextRef.current = null;
+    audioContextRef.current =
+      null;
+
+    if (
+      context &&
+      context.state !==
+      "closed"
+    ) {
+      try {
+        await context.close();
+      } catch {
+        // Already closing/closed.
+      }
     }
 
     try {
-      if (session.conversation_id) {
+      if (
+        session.conversation_id
+      ) {
         await endCall(
           session.conversation_id
         );
       }
     } catch {
-      // Close locally even if provider cleanup fails.
+      /*
+       * Close locally even if provider
+       * cleanup fails.
+       */
     } finally {
       onClose();
     }
   }
+
 
   return (
     <div
@@ -599,18 +1863,30 @@ export function CallModal({ session, onClose }: Props) {
       role="dialog"
       aria-modal="true"
       aria-label={label}
+      onPointerDown={() => {
+        /*
+         * Any normal interaction with
+         * the call also helps satisfy
+         * browser audio-unlock policies.
+         */
+        if (!isVideo) {
+          void unlockAudio();
+        }
+      }}
     >
       <div
         className={`call-shell ${isVideo
-            ? "call-shell--video"
-            : "call-shell--voice"
+          ? "call-shell--video"
+          : "call-shell--voice"
           }`}
       >
         {session.conversation_url &&
           !session.demo ? (
           <iframe
             className="tavus-frame"
-            src={session.conversation_url}
+            src={
+              session.conversation_url
+            }
             allow="camera; microphone; fullscreen; display-capture; autoplay"
             title="AI Virat Kohli conversation"
           />
@@ -645,15 +1921,17 @@ export function CallModal({ session, onClose }: Props) {
             >
               {Array.from({
                 length: 24,
-              }).map((_, i) => (
-                <span
-                  key={i}
-                  style={{
-                    animationDelay: `${i * 45
-                      }ms`,
-                  }}
-                />
-              ))}
+              }).map(
+                (_, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      animationDelay: `${i * 45
+                        }ms`,
+                    }}
+                  />
+                )
+              )}
             </div>
           </div>
         )}
@@ -671,7 +1949,9 @@ export function CallModal({ session, onClose }: Props) {
           </div>
 
           <div className="call-time">
-            {formatTime(seconds)}
+            {formatTime(
+              seconds
+            )}
           </div>
         </div>
 
@@ -679,7 +1959,10 @@ export function CallModal({ session, onClose }: Props) {
           {!isVideo &&
             latestTranscript && (
               <p className="demo-note">
-                You: {latestTranscript}
+                You:{" "}
+                {
+                  latestTranscript
+                }
               </p>
             )}
 
@@ -693,36 +1976,37 @@ export function CallModal({ session, onClose }: Props) {
           <div className="call-controls">
             {!isVideo && (
               <button
-                className={`round-control ${voiceState ===
-                    "listening"
-                    ? "active"
-                    : ""
+                className={`round-control ${muted
+                  ? "active"
+                  : ""
                   }`}
                 onClick={() => {
-                  void handleMic();
+                  void handleVoiceControl();
                 }}
-                disabled={
-                  voiceState ===
-                  "thinking" ||
-                  voiceState ===
-                  "speaking"
+                disabled={ending}
+                aria-pressed={
+                  muted
                 }
               >
                 {voiceState ===
-                  "listening"
-                  ? "STOP"
-                  : "MIC"}
+                  "error"
+                  ? "RETRY"
+                  : muted
+                    ? "UNMUTE"
+                    : "MUTE"}
               </button>
             )}
 
             {isVideo && (
               <button
                 className={`round-control ${!camera
-                    ? "active"
-                    : ""
+                  ? "active"
+                  : ""
                   }`}
                 onClick={() => {
-                  setCamera(!camera);
+                  setCamera(
+                    !camera
+                  );
                 }}
               >
                 {camera
@@ -733,7 +2017,9 @@ export function CallModal({ session, onClose }: Props) {
 
             <button
               className="end-control"
-              onClick={leave}
+              onClick={() => {
+                void leave();
+              }}
               disabled={ending}
             >
               {ending
