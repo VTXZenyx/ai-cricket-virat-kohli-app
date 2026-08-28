@@ -50,6 +50,10 @@ def _build_instructions(
             "- Prefer one strong practical point over a long explanation.\n"
             "- Ask at most one short follow-up question when it genuinely helps.\n"
             "- Give a longer reply only when the user clearly asks for detail.\n"
+            "- IMPORTANT: Start with a very short first sentence of about 3 to 8 words.\n"
+"- The first sentence should sound natural and immediate, like a real person reacting.\n"
+"- Put the actual explanation in sentence 2 and sentence 3.\n"
+"- Do not make the first sentence a long question.\n"
         )
     else:
         instructions += (
